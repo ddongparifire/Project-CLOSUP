@@ -72,3 +72,36 @@ Open setup decisions
 - Who approves text written by AI.
 - How Drupal revisions, date fields, and cache effects will be handled during
   staging and publication.
+
+Prototype tools
+
+The first rule-tool prototype is in accessibility_remediation/tables.py. It
+uses BeautifulSoup with html5lib for tolerant HTML parsing; it does not connect
+to Drupal or publish content. Python 3.10 or later is recommended.
+
+To install its dependencies and run the tests from the repository root:
+
+    python -m pip install -r requirements.txt
+    python -m pytest
+
+The ten made-up legacy examples are in samples/legacy/.
+
+Use the scanner and conservative simple-table fixer from Python:
+
+    from accessibility_remediation import apply_fix, scan_table
+
+    issues = scan_table(table_html)
+    fixed_html = apply_fix(table_html)
+
+scan_table returns issue codes such as missing-caption, no-headers,
+header-missing-scope, missing-thead, missing-tbody, unclosed-tag, merged-cells,
+multi-level-headers, spacer-row, and irregular-rows. apply_fix handles only regular,
+single-header-row tables: it promotes the first non-empty row to column headers,
+adds scope values, and creates thead/tbody sections. It preserves the ordered,
+normalized text values of all cells and raises an error if they differ.
+
+The fixer deliberately refuses merged cells, irregular or spacer rows,
+multi-level headers, ambiguous existing header structures, and footer rows.
+It does not invent captions or determine whether inferred headers are
+semantically correct. Those cases need human judgment and review before any
+result could be used.
