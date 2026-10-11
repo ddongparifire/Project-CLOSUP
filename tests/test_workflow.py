@@ -29,6 +29,10 @@ def _write_decision(output_dir, field, decision, note="", attempt=1):
     path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
+def _write_json(path, value):
+    path.write_text(json.dumps(value, indent=2), encoding="utf-8")
+
+
 def _single_review_field(tmp_path):
     samples = tmp_path / "samples"
     samples.mkdir()
@@ -40,6 +44,22 @@ def _single_review_field(tmp_path):
     output = tmp_path / "workflow_output"
     run_workflow(samples, output)
     return samples, output, source
+
+
+def _write_valid_edit(output_dir, field="one_field"):
+    edits = output_dir / "edits"
+    edits.mkdir(exist_ok=True)
+    edit = (
+        "<table><caption>District population</caption>"
+        "<thead><tr><th scope='col'>Label</th><th scope='col'>Value</th></tr></thead>"
+        "<tbody><tr><th scope='row'>District</th><td>Lakeview</td></tr></tbody></table>"
+    )
+    (edits / f"{field}.html").write_text(edit)
+    return edit
+
+
+def _write_json(path, value):
+    path.write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
 def test_workflow_stages_whole_passing_fields_and_writes_review_report(tmp_path):
@@ -157,8 +177,7 @@ def test_rendered_preview_is_sanitized_but_source_code_is_preserved(tmp_path):
 
 def test_approve_stages_fixed_whole_field_and_marks_it_approved(tmp_path):
     _, output_dir, source = _single_review_field(tmp_path)
-    record = _load_json(output_dir / "review.json")[0]
-    fixed_html = record["fixed_html"]
+    fixed_html = _write_valid_edit(output_dir)
     _write_decision(output_dir, "one_field", "approve", "Looks good")
 
     counts = process_review_decisions(output_dir, reviewer="A Reviewer")
@@ -169,11 +188,14 @@ def test_approve_stages_fixed_whole_field_and_marks_it_approved(tmp_path):
     assert updated["status"] == "approved"
     assert updated["decision"] == "approve"
     assert updated["original_html"] == source
+    assert updated["approval_source"] == "reviewer_edit"
+    assert "approved HTML source: reviewer_edit" in (output_dir / "report.html").read_text()
     event = json.loads((output_dir / "review_log.jsonl").read_text().splitlines()[0])
     assert event["field"] == "one_field"
     assert event["reviewer"] == "A Reviewer"
     assert event["note"] == "Looks good"
     assert event["timestamp"]
+    assert event["approved_html_source"] == "reviewer_edit"
 
 
 def test_approve_stages_the_complete_field_with_surrounding_text(tmp_path):
@@ -187,6 +209,15 @@ def test_approve_stages_the_complete_field_with_surrounding_text(tmp_path):
     (samples / "notes.html").write_text(source)
     output_dir = tmp_path / "workflow_output"
     run_workflow(samples, output_dir)
+    edits = output_dir / "edits"
+    edits.mkdir()
+    (edits / "notes.html").write_text(
+        "<p>Introductory note.</p>"
+        "<table><caption>Field notes</caption><thead><tr>"
+        "<th scope='col'>Label</th>"
+        "</tr></thead><tbody><tr><td>Value</td>"
+        "</tr></tbody></table><p>Footnote after the table.</p>"
+    )
     _write_decision(output_dir, "notes", "approve", "Reviewed")
 
     process_review_decisions(output_dir)
@@ -195,6 +226,110 @@ def test_approve_stages_the_complete_field_with_surrounding_text(tmp_path):
     assert "Introductory note." in staged
     assert "Footnote after the table." in staged
     assert "<thead>" in staged
+
+
+def test_approve_merged_cells_without_edit_is_refused(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
+
+    with pytest.raises(ValueError, match="provide reviewer-corrected HTML"):
+        process_review_decisions(output_dir)
+
+    assert not (output_dir / "staging" / "merged_cells.html").exists()
+    assert _load_json(output_dir / "review.json")[0]["status"] == "review"
+    assert not (output_dir / "review_log.jsonl").exists()
+
+
+def test_approve_merged_cells_with_valid_edit_stages_it(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    edit = (
+        "<table><caption>Districts by area</caption>"
+        "<thead><tr><th scope='col'>Area</th></tr></thead>"
+        "<tbody><tr><td>District</td></tr><tr><td>North</td></tr>"
+        "<tr><td>Lakeview</td></tr><tr><td>Riverside</td></tr></tbody></table>"
+    )
+    edits = output_dir / "edits"
+    edits.mkdir()
+    (edits / "merged_cells.html").write_text(edit)
+    _write_decision(output_dir, "merged_cells", "approve", "Corrected manually")
+
+    process_review_decisions(output_dir)
+
+    assert (output_dir / "staging" / "merged_cells.html").read_text() == edit
+    event = json.loads((output_dir / "review_log.jsonl").read_text().splitlines()[0])
+    assert event["approved_html_source"] == "reviewer_edit"
+
+
+def test_approve_edit_that_changes_cell_value_is_refused(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    edits = output_dir / "edits"
+    edits.mkdir()
+    (edits / "merged_cells.html").write_text(
+        "<table><caption>Districts by area</caption>"
+        "<thead><tr><th scope='col'>Area</th><th scope='col'>District</th></tr></thead>"
+        "<tbody><tr><th scope='row'>North</th><td>Lakeview</td></tr>"
+        "<tr><th scope='row'>North</th><td>Changed</td></tr></tbody></table>"
+    )
+    _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
+
+    with pytest.raises(ValueError, match="cell values changed"):
+        process_review_decisions(output_dir)
+
+    assert not (output_dir / "staging" / "merged_cells.html").exists()
+    assert _load_json(output_dir / "review.json")[0]["status"] == "review"
+    assert not (output_dir / "review_log.jsonl").exists()
+
+
+def test_approve_reviewer_edit_with_accessibility_issues_is_refused(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    edits = output_dir / "edits"
+    edits.mkdir()
+    (edits / "merged_cells.html").write_text(
+        "<table><thead><tr><th>Area</th></tr></thead>"
+        "<tbody><tr><td>District</td></tr><tr><td>North</td></tr>"
+        "<tr><td>Lakeview</td></tr><tr><td>Riverside</td></tr></tbody></table>"
+    )
+    _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
+
+    with pytest.raises(ValueError, match="reviewer edit has unresolved issues"):
+        process_review_decisions(output_dir)
+
+    assert not (output_dir / "staging" / "merged_cells.html").exists()
+
+
+def test_approved_rules_source_is_logged(tmp_path):
+    _, output_dir, _ = _single_review_field(tmp_path)
+    record = _load_json(output_dir / "review.json")[0]
+    record["table_reviews"][0].update(fixed=True, issues_after=[], review_reasons=[])
+    record["fixed_html"] = (
+        "<table><caption>District population</caption>"
+        "<thead><tr><th scope='col'>Label</th><th scope='col'>Value</th></tr></thead>"
+        "<tbody><tr><th scope='row'>District</th><td>Lakeview</td></tr></tbody></table>"
+    )
+    _write_json(output_dir / "review.json", [record])
+    _write_json(output_dir / "fields.json", [record])
+    _write_decision(output_dir, "one_field", "approve", "Rules passed")
+
+    process_review_decisions(output_dir)
+
+    event = json.loads((output_dir / "review_log.jsonl").read_text().splitlines()[0])
+    assert event["approved_html_source"] == "rules"
 
 
 def test_first_reject_retries_once_and_attaches_feedback(tmp_path):
@@ -292,6 +427,7 @@ def test_existing_pending_decisions_survive_workflow_rerun(tmp_path):
 
 def test_review_cli_command_applies_approve_decision(tmp_path):
     _, output_dir, _ = _single_review_field(tmp_path)
+    _write_valid_edit(output_dir)
     _write_decision(output_dir, "one_field", "approve", "Approved")
 
     result = subprocess.run(
@@ -309,9 +445,33 @@ def test_review_cli_command_applies_approve_decision(tmp_path):
     assert event["reviewer"] == "CLI Reviewer"
 
 
+def test_auto_staged_fields_stay_in_report_after_review_command(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "auto.html").write_text(
+        "<table><caption>Results</caption><thead><tr>"
+        "<th scope='col'>Year</th></tr></thead><tbody><tr><td>2025</td>"
+        "</tr></tbody></table>"
+    )
+    (samples / "needs_review.html").write_text(
+        "<table><tr><td>Label</td><td>Value</td></tr></table>"
+    )
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    _write_decision(output_dir, "needs_review", "manual", "Human review")
+
+    process_review_decisions(output_dir)
+
+    report = (output_dir / "report.html").read_text()
+    assert "Field auto" in report
+    assert "Status: <strong>staged</strong>" in report
+    assert "Field needs_review" in report
+    assert "Status: <strong>manual</strong>" in report
+
+
 def test_all_workflow_outputs_stay_inside_configured_output_dir(tmp_path):
     _, output_dir, _ = _single_review_field(tmp_path)
-    _write_decision(output_dir, "one_field", "approve", "Approved")
+    _write_decision(output_dir, "one_field", "manual", "Needs review")
     process_review_decisions(output_dir)
 
     for path in output_dir.rglob("*"):

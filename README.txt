@@ -87,7 +87,7 @@ To install its dependencies and run the tests from the repository root:
     python -m pip install -r requirements.txt
     python -m pytest
 
-The ten made-up legacy examples are in samples/legacy/.
+The eleven made-up legacy sample fields are in samples/legacy/.
 
 Run the local agent-loop prototype against all bundled samples with one command:
 
@@ -104,22 +104,40 @@ Use `--samples-dir` and `--output-dir` to select different local folders.
 
 For each field in `review.json`, `workflow_output/decisions.json` contains a
 pending decision. Set `decision` to `approve`, `reject`, or `manual`; add a
-note when rejecting. Apply pending choices with:
+note when rejecting. A field can be approved directly from rule output only
+when every table was fixed with no unresolved review reasons or scan issues.
+Otherwise, provide corrected full-field HTML at
+`workflow_output/edits/<field>.html` before approving. The reviewer edit must
+preserve all ordered cell values and pass `scan_table` with no outstanding
+issues, including a missing caption. Invalid approvals are refused and left in
+review. The review log records whether approved content came from rules or a
+reviewer edit. Apply pending choices with:
 
     python -m accessibility_remediation review
 
-An approved field's full fixed HTML is copied to staging. A first rejection
-requires a non-empty note and triggers one deterministic retry; the note is
-logged for a future AI step, but the rules do not consume it. A still-flagged
-field returns to review at attempt 2. A second rejection or `manual` decision
-moves the field, notes, and reasons to `workflow_output/manual_queue.json`.
+An approved field's full validated HTML is copied to staging. This is the
+rules' fixed output only when every table was fixed without review reasons and
+the final field has no scan issues. Otherwise, the reviewer must provide
+corrected full-field HTML under `workflow_output/edits/<field>.html`; approval
+checks that cell values are unchanged and `scan_table` reports no issues before
+staging. Failed checks refuse approval and leave the field in review. The
+decision log identifies whether staged content came from the rules or a
+reviewer edit.
+
+A first rejection requires a non-empty note and triggers one deterministic
+retry; the note is logged for a future AI step, but the rules do not consume
+it. A still-flagged field returns to review at attempt 2. A second rejection or
+`manual` decision moves the field, notes, and reasons to
+`workflow_output/manual_queue.json`.
 After a first rejection, the loop sets the decision back to `null` and advances
 the attempt to 2; the reviewer may then set a second decision. A passing retry
 is staged and removed from the active review list.
 Every applied decision is appended with a timestamp to
 `workflow_output/review_log.jsonl`; pass `--reviewer "Name"` to record who
 reviewed it. Decisions and notes are shown in the report. Re-running the main
-loop preserves pending decisions for fields that still need review.
+loop preserves pending decisions for fields that still need review. The report
+is regenerated after each review command from all fields, including fields
+already staged, approved, still in review, or sent to the manual queue.
 
 The caption step is an explicit placeholder: it does not invent or insert
 caption text. A missing caption is routed through that step and remains in the

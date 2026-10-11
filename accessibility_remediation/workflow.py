@@ -275,6 +275,60 @@ def _stage_field(staging_dir: Path, field: str, fixed_html: str) -> str:
     return filename
 
 
+def _rules_are_approval_ready(record: dict[str, Any]) -> bool:
+    table_reviews = [
+        table for table in record.get("table_reviews", [])
+        if table.get("table") is not None
+    ]
+    return bool(table_reviews) and all(
+        table.get("fixed") is True
+        and not table.get("issues_after")
+        and not table.get("review_reasons")
+        for table in table_reviews
+    ) and not scan_table(record["fixed_html"])
+
+
+def _approved_html(
+    output_dir: Path,
+    record: dict[str, Any],
+) -> tuple[str, str]:
+    if _rules_are_approval_ready(record):
+        validate_cell_values(record["original_html"], record["fixed_html"])
+        issues = scan_table(record["fixed_html"])
+        if issues:
+            raise ValueError(
+                f"Cannot approve {record['field']}: rule output has unresolved issues: "
+                f"{', '.join(issues)}."
+            )
+        return record["fixed_html"], "rules"
+
+    field = record["field"]
+    edits_path = output_dir / "edits" / f"{_safe_stem(field)}.html"
+    if not edits_path.is_file() or edits_path.is_symlink():
+        raise ValueError(
+            f"Cannot approve {field}: the rules did not resolve every table; "
+            f"provide reviewer-corrected HTML at {edits_path}."
+        )
+    edited_html = _read_text_exact(edits_path)
+    validate_cell_values(record["original_html"], edited_html)
+    issues = scan_table(edited_html)
+    if issues:
+        raise ValueError(
+            f"Cannot approve {field}: reviewer edit has unresolved issues: "
+            f"{', '.join(issues)}."
+        )
+    return edited_html, "reviewer_edit"
+
+
+def _set_approved_output(record: dict[str, Any], content: str, source: str) -> None:
+    record["fixed_html"] = content
+    record["approval_source"] = source
+    parsed_tables = _table_fragments(content)
+    for index, table in enumerate(record.get("table_reviews", [])):
+        if index < len(parsed_tables):
+            table["parsed_after_view"] = parsed_tables[index]
+
+
 def _unstage_field(staging_dir: Path, field: str) -> None:
     filename = f"{_safe_stem(field)}.html"
     files, file_set = _staging_manifest(staging_dir)
@@ -352,10 +406,15 @@ def _render_report(records: list[dict[str, Any]], table_count: int, staged: int)
                 f"</div></article>"
             )
         table_markup = "".join(table_details) or "<p>No tables found in this field.</p>"
+        approval_source = record.get("approval_source")
+        source_markup = (
+            f"; approved HTML source: {html.escape(str(approval_source))}"
+            if approval_source else ""
+        )
         sections.append(
             f"<section><h2>Field {field}</h2>"
             f"<p>Status: <strong>{status}</strong>; decision: <strong>{decision}</strong>; "
-            f"attempt: {attempt}</p><h3>Notes</h3>{notes_markup}"
+            f"attempt: {attempt}{source_markup}</p><h3>Notes</h3>{notes_markup}"
             f"<div class=\"comparison\">"
             f"<div><h3>Before — original source (exact field text)</h3>"
             f"<div class=\"preview\">{original_preview}</div><pre><code>{original_code}</code></pre></div>"
@@ -494,8 +553,9 @@ def run_workflow(
                 record["note"] = decision.get("note", "")
                 record["attempt"] = decision.get("attempt", 1)
                 if _already_applied(decision) and decision.get("decision") == "approve":
-                    validate_cell_values(original_html, record["fixed_html"])
-                    _stage_field(staging_dir, field, record["fixed_html"])
+                    approved_html, source = _approved_html(destination, record)
+                    _stage_field(staging_dir, field, approved_html)
+                    _set_approved_output(record, approved_html, source)
                     record["status"] = "approved"
                     tables_staged += 1
                 elif (
@@ -519,6 +579,7 @@ def run_workflow(
     decisions_output = _prepare_decisions(review_records, existing_decisions)
     _write_json(destination / "review.json", review_records)
     _write_json(destination / "decisions.json", decisions_output)
+    _write_json(destination / "fields.json", report_records)
     _write_report(destination, report_records, tables_processed)
     return WorkflowSummary(
         samples_processed=len(sample_paths),
@@ -537,6 +598,7 @@ def _log_decision(
     note: str,
     attempt: int,
     reviewer: str | None,
+    approved_html_source: str | None = None,
 ) -> None:
     event: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -547,6 +609,8 @@ def _log_decision(
     }
     if reviewer:
         event["reviewer"] = reviewer
+    if approved_html_source is not None:
+        event["approved_html_source"] = approved_html_source
     log_path = output_dir / "review_log.jsonl"
     if log_path.is_symlink() or log_path.parent.is_symlink():
         raise ValueError(f"Refusing to write through a symlink: {log_path}")
@@ -586,6 +650,16 @@ def process_review_decisions(
     _ensure_output_directory(staging_dir)
     staged = retried = queued = 0
     updated_records = {record["field"]: record for record in records}
+    field_records_raw = _read_json(destination / "fields.json", records)
+    if not isinstance(field_records_raw, list):
+        raise ValueError("fields.json must contain a list.")
+    all_field_records = {
+        record["field"]: record
+        for record in field_records_raw
+        if isinstance(record, dict) and isinstance(record.get("field"), str)
+    }
+    for field, record in updated_records.items():
+        all_field_records[field] = record
 
     for field, record in updated_records.items():
         decision_entry = decisions.get(field)
@@ -605,21 +679,38 @@ def process_review_decisions(
         if not isinstance(attempt, int) or attempt < 1:
             raise ValueError(f"Attempt for {field} must be a positive integer.")
 
-        _log_decision(destination, field, choice, note, attempt, reviewer)
-        _mark_applied(decision_entry)
-
         if choice == "approve":
             original_html = record["original_html"]
-            fixed_html = record["fixed_html"]
+            fixed_html, html_source = _approved_html(destination, record)
             validate_cell_values(original_html, fixed_html)
+            issues = scan_table(fixed_html)
+            if issues:
+                raise ValueError(
+                    f"Cannot approve {field}: approved HTML has unresolved issues: "
+                    f"{', '.join(issues)}."
+                )
             _stage_field(staging_dir, field, fixed_html)
+            _set_approved_output(record, fixed_html, html_source)
             record["status"] = "approved"
             record["decision"] = "approve"
             record["note"] = note
             record["attempt"] = attempt
+            _log_decision(
+                destination,
+                field,
+                choice,
+                note,
+                attempt,
+                reviewer,
+                approved_html_source=html_source,
+            )
+            _mark_applied(decision_entry)
+            all_field_records[field] = record
             staged += 1
         elif choice == "manual" or attempt >= 2:
             _unstage_field(staging_dir, field)
+            _log_decision(destination, field, choice, note, attempt, reviewer)
+            _mark_applied(decision_entry)
             record["status"] = "manual"
             record["decision"] = "manual" if choice == "manual" else "reject"
             record["note"] = note
@@ -643,8 +734,11 @@ def process_review_decisions(
             }
             manual_by_field[field] = manual_record
             _write_json(destination / "manual_queue.json", list(manual_by_field.values()))
+            all_field_records[field] = record
         else:
             _unstage_field(staging_dir, field)
+            _log_decision(destination, field, choice, note, attempt, reviewer)
+            _mark_applied(decision_entry)
             original_html = record["original_html"]
             retried_record = _evaluate_field(field, original_html)
             feedback_notes = list(record.get("feedback_notes", []))
@@ -661,9 +755,12 @@ def process_review_decisions(
                 _stage_field(staging_dir, field, retried_record["fixed_html"])
                 updated_records.pop(field, None)
                 decisions.pop(field, None)
+                retried_record["status"] = "staged_after_retry"
+                all_field_records[field] = retried_record
                 staged += 1
             else:
                 updated_records[field] = retried_record
+                all_field_records[field] = retried_record
                 decision_entry["decision"] = None
                 decision_entry["attempt"] = 2
                 retried += 1
@@ -671,5 +768,7 @@ def process_review_decisions(
     updated = list(updated_records.values())
     _write_json(destination / "review.json", updated)
     _write_json(destination / "decisions.json", list(decisions.values()))
-    _write_report(destination, updated)
+    all_fields = list(all_field_records.values())
+    _write_json(destination / "fields.json", all_fields)
+    _write_report(destination, all_fields)
     return {"staged": staged, "retried": retried, "manual": queued}
