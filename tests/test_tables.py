@@ -101,7 +101,7 @@ def test_data_check_rejects_changed_cell_value():
 
 def test_all_samples_are_readable_and_scannable():
     samples = sorted(SAMPLES.glob("*.html"))
-    assert len(samples) == 10
+    assert len(samples) == 11
     assert all(isinstance(scan_table(path.read_text()), list) for path in samples)
 
 
