@@ -18,6 +18,8 @@ Before processing records
 - Back up source content and preserve each record's original HTML for rollback.
 - Classify records and hand-check a sample of tables against the 2025 template.
 - Confirm access and review arrangements listed under Open setup decisions.
+- Before introducing any real CLOSUP data, make this repository private and
+  confirm the approved data-handling environment and access controls.
 
 Processing workflow
 
@@ -88,20 +90,38 @@ The ten made-up legacy examples are in samples/legacy/.
 
 Use the scanner and conservative simple-table fixer from Python:
 
-    from accessibility_remediation import apply_fix, scan_table
+    from accessibility_remediation import apply_fix, apply_fixes_to_fields, scan_table
 
     issues = scan_table(table_html)
-    fixed_html = apply_fix(table_html)
+    result = apply_fix(table_html)
+    fixed_html = result.html
+    send_to_human_review = result.needs_review
 
-scan_table returns issue codes such as missing-caption, no-headers,
+For a record with multiple code fields, submit every supplied field together:
+
+    record_result = apply_fixes_to_fields({
+        "field_a": field_a_html,
+        "field_b": field_b_html,
+    })
+    send_record_to_human_review = record_result.needs_review
+
+`apply_fix` processes every table in its HTML field. Its result includes a
+confidence score, per-table outcomes, and review reasons; the aggregate
+confidence is the lowest table confidence. `apply_fixes_to_fields` also
+aggregates across every supplied field. Any inferred first-row header is
+explicitly low-confidence and requires human review, even when structural
+validation passes. Unsupported tables remain unchanged and are flagged for
+review, while other tables in the field are still processed. Results requiring
+review must not enter an automatic staging path.
+
+`scan_table` returns issue codes found across all tables, such as missing-caption, no-headers,
 header-missing-scope, missing-thead, missing-tbody, unclosed-tag, merged-cells,
 multi-level-headers, spacer-row, and irregular-rows. apply_fix handles only regular,
-single-header-row tables: it promotes the first non-empty row to column headers,
-adds scope values, and creates thead/tbody sections. It preserves the ordered,
-normalized text values of all cells and raises an error if they differ.
+single-header-row tables: it may promote the first non-empty row to column
+headers, adds scope values, and creates thead/tbody sections. It preserves the
+ordered, normalized text values of all cells and raises an error if they differ.
 
 The fixer deliberately refuses merged cells, irregular or spacer rows,
 multi-level headers, ambiguous existing header structures, and footer rows.
 It does not invent captions or determine whether inferred headers are
-semantically correct. Those cases need human judgment and review before any
-result could be used.
+semantically correct. Such results need human review before they could be used.
