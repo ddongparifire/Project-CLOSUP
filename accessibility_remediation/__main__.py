@@ -43,6 +43,10 @@ def main() -> None:
             f"Review decisions processed: {counts['staged']} staged, "
             f"{counts['retried']} retried, {counts['manual']} sent to manual queue."
         )
+        failed_fields = counts.get("failed_fields", [])
+        if failed_fields:
+            print(f"Decisions failed for: {', '.join(failed_fields)}")
+            raise SystemExit(1)
         return
 
     summary = run_workflow(args.samples_dir, args.output_dir)

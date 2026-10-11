@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from bs4 import BeautifulSoup
 
+from accessibility_remediation import scan_table
 from accessibility_remediation.workflow import process_review_decisions, run_workflow
 
 
@@ -228,7 +229,7 @@ def test_approve_stages_the_complete_field_with_surrounding_text(tmp_path):
     assert "<thead>" in staged
 
 
-def test_approve_merged_cells_without_edit_is_refused(tmp_path):
+def test_approve_merged_cells_without_edit_is_refused_but_saved_for_review(tmp_path):
     samples = tmp_path / "samples"
     samples.mkdir()
     (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
@@ -236,11 +237,13 @@ def test_approve_merged_cells_without_edit_is_refused(tmp_path):
     run_workflow(samples, output_dir)
     _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
 
-    with pytest.raises(ValueError, match="provide reviewer-corrected HTML"):
-        process_review_decisions(output_dir)
+    counts = process_review_decisions(output_dir)
 
+    assert counts["failed_fields"] == ["merged_cells"]
     assert not (output_dir / "staging" / "merged_cells.html").exists()
-    assert _load_json(output_dir / "review.json")[0]["status"] == "review"
+    record = _load_json(output_dir / "review.json")[0]
+    assert record["status"] == "review"
+    assert "provide reviewer-corrected HTML" in record["decision_errors"][0]
     assert not (output_dir / "review_log.jsonl").exists()
 
 
@@ -251,10 +254,10 @@ def test_approve_merged_cells_with_valid_edit_stages_it(tmp_path):
     output_dir = tmp_path / "run"
     run_workflow(samples, output_dir)
     edit = (
-        "<table><caption>Districts by area</caption>"
-        "<thead><tr><th scope='col'>Area</th></tr></thead>"
-        "<tbody><tr><td>District</td></tr><tr><td>North</td></tr>"
-        "<tr><td>Lakeview</td></tr><tr><td>Riverside</td></tr></tbody></table>"
+        "<table><caption>Districts by area</caption><thead><tr>"
+        "<th scope='col'>Area</th><th scope='col'>District</th></tr></thead><tbody>"
+        '<tr><td rowspan="2">North</td><td>Lakeview</td></tr>'
+        "<tr><td>Riverside</td></tr></tbody></table>"
     )
     edits = output_dir / "edits"
     edits.mkdir()
@@ -266,6 +269,63 @@ def test_approve_merged_cells_with_valid_edit_stages_it(tmp_path):
     assert (output_dir / "staging" / "merged_cells.html").read_text() == edit
     event = json.loads((output_dir / "review_log.jsonl").read_text().splitlines()[0])
     assert event["approved_html_source"] == "reviewer_edit"
+    assert scan_table(edit) == []
+    assert "merged-cells" in _load_json(output_dir / "review.json")[0]["table_reviews"][0]["complexity_notes_after"]
+    assert not _load_json(output_dir / "review.json")[0]["decision_errors"]
+
+
+def test_refused_approval_can_be_corrected_and_applied_without_duplicate_log(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
+
+    failed = process_review_decisions(output_dir)
+    assert failed["failed_fields"] == ["merged_cells"]
+
+    edits = output_dir / "edits"
+    edits.mkdir()
+    (edits / "merged_cells.html").write_text(
+        "<table><caption>Districts by area</caption><thead><tr>"
+        "<th scope='col'>Area</th><th scope='col'>District</th></tr></thead><tbody>"
+        '<tr><td rowspan="2">North</td><td>Lakeview</td></tr>'
+        "<tr><td>Riverside</td></tr></tbody></table>"
+    )
+    applied = process_review_decisions(output_dir)
+
+    assert applied["staged"] == 1
+    record = _load_json(output_dir / "review.json")[0]
+    assert record["status"] == "approved"
+    assert record["decision_errors"] == []
+    events = (output_dir / "review_log.jsonl").read_text().splitlines()
+    assert len(events) == 1
+
+
+def test_approve_merged_edit_with_missing_scope_is_refused(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    edits = output_dir / "edits"
+    edits.mkdir()
+    (edits / "merged_cells.html").write_text(
+        "<table><caption>Districts by area</caption><thead><tr>"
+        "<th>Area</th><th>District</th></tr></thead><tbody>"
+        '<tr><td rowspan="2">North</td><td>Lakeview</td></tr>'
+        "<tr><td>Riverside</td></tr></tbody></table>"
+    )
+    _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
+
+    counts = process_review_decisions(output_dir)
+
+    assert counts["failed_fields"] == ["merged_cells"]
+    record = _load_json(output_dir / "review.json")[0]
+    assert record["status"] == "review"
+    assert "header-missing-scope" in record["decision_errors"][0]
+    assert not (output_dir / "staging" / "merged_cells.html").exists()
 
 
 def test_approve_edit_that_changes_cell_value_is_refused(tmp_path):
@@ -284,11 +344,13 @@ def test_approve_edit_that_changes_cell_value_is_refused(tmp_path):
     )
     _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
 
-    with pytest.raises(ValueError, match="cell values changed"):
-        process_review_decisions(output_dir)
+    counts = process_review_decisions(output_dir)
 
+    assert counts["failed_fields"] == ["merged_cells"]
     assert not (output_dir / "staging" / "merged_cells.html").exists()
-    assert _load_json(output_dir / "review.json")[0]["status"] == "review"
+    record = _load_json(output_dir / "review.json")[0]
+    assert record["status"] == "review"
+    assert "cell values changed" in record["decision_errors"][0]
     assert not (output_dir / "review_log.jsonl").exists()
 
 
@@ -307,16 +369,22 @@ def test_approve_reviewer_edit_with_accessibility_issues_is_refused(tmp_path):
     )
     _write_decision(output_dir, "merged_cells", "approve", "Reviewed")
 
-    with pytest.raises(ValueError, match="reviewer edit has unresolved issues"):
-        process_review_decisions(output_dir)
+    counts = process_review_decisions(output_dir)
 
+    assert counts["failed_fields"] == ["merged_cells"]
     assert not (output_dir / "staging" / "merged_cells.html").exists()
+    assert "missing-caption" in _load_json(output_dir / "review.json")[0]["decision_errors"][0]
 
 
 def test_approved_rules_source_is_logged(tmp_path):
     _, output_dir, _ = _single_review_field(tmp_path)
     record = _load_json(output_dir / "review.json")[0]
-    record["table_reviews"][0].update(fixed=True, issues_after=[], review_reasons=[])
+    record["table_reviews"][0].update(
+        fixed=True,
+        issues_after=[],
+        blocking_errors=[],
+        review_reasons=[],
+    )
     record["fixed_html"] = (
         "<table><caption>District population</caption>"
         "<thead><tr><th scope='col'>Label</th><th scope='col'>Value</th></tr></thead>"
@@ -404,10 +472,78 @@ def test_reject_without_note_is_refused_before_logging(tmp_path):
     _, output_dir, _ = _single_review_field(tmp_path)
     _write_decision(output_dir, "one_field", "reject", " ")
 
-    with pytest.raises(ValueError, match="requires a non-empty note"):
-        process_review_decisions(output_dir)
+    counts = process_review_decisions(output_dir)
 
+    assert counts["failed_fields"] == ["one_field"]
     assert not (output_dir / "review_log.jsonl").exists()
+    assert "requires a non-empty note" in _load_json(output_dir / "review.json")[0]["decision_errors"][0]
+
+
+def test_failed_decision_does_not_block_other_fields_and_is_not_relogged(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "irregular_rows.html").write_text((SAMPLES / "irregular_rows.html").read_text())
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    _write_decision(output_dir, "irregular_rows", "manual", "Needs specialist")
+    _write_decision(output_dir, "merged_cells", "approve", "Approve without an edit")
+
+    result = process_review_decisions(output_dir)
+
+    assert result["failed_fields"] == ["merged_cells"]
+    assert (output_dir / "decisions.json").is_file()
+    assert (output_dir / "review.json").is_file()
+    assert (output_dir / "fields.json").is_file()
+    assert (output_dir / "report.html").is_file()
+    review_records = {r["field"]: r for r in _load_json(output_dir / "review.json")}
+    assert review_records["irregular_rows"]["status"] == "manual"
+    assert review_records["merged_cells"]["status"] == "review"
+    assert review_records["merged_cells"]["decision_errors"]
+    decisions = {d["field"]: d for d in _load_json(output_dir / "decisions.json")}
+    assert decisions["irregular_rows"]["last_applied"]["decision"] == "manual"
+    assert "last_applied" not in decisions["merged_cells"]
+    events = [
+        json.loads(line)
+        for line in (output_dir / "review_log.jsonl").read_text().splitlines()
+    ]
+    assert [(event["field"], event["decision"]) for event in events] == [
+        ("irregular_rows", "manual")
+    ]
+
+    second = process_review_decisions(output_dir)
+
+    assert second["failed_fields"] == ["merged_cells"]
+    events = [
+        json.loads(line)
+        for line in (output_dir / "review_log.jsonl").read_text().splitlines()
+    ]
+    assert [(event["field"], event["decision"]) for event in events] == [
+        ("irregular_rows", "manual")
+    ]
+    assert review_records["irregular_rows"]["status"] == "manual"
+
+
+def test_cli_exits_nonzero_and_lists_refused_fields(tmp_path):
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "merged_cells.html").write_text((SAMPLES / "merged_cells.html").read_text())
+    output_dir = tmp_path / "run"
+    run_workflow(samples, output_dir)
+    _write_decision(output_dir, "merged_cells", "approve", "Needs edit")
+
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "accessibility_remediation", "review",
+            "--output-dir", str(output_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "merged_cells" in result.stdout
+    assert _load_json(output_dir / "review.json")[0]["decision_errors"]
 
 
 def test_existing_pending_decisions_survive_workflow_rerun(tmp_path):
