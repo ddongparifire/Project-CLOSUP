@@ -8,6 +8,7 @@ from .tables import (
     apply_fixes_to_fields,
     extract_cell_values,
     scan_table,
+    scan_table_notes,
     validate_cell_values,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "apply_fixes_to_fields",
     "extract_cell_values",
     "scan_table",
+    "scan_table_notes",
     "validate_cell_values",
 ]

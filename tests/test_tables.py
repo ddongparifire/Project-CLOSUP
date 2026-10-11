@@ -7,6 +7,7 @@ from accessibility_remediation import (
     apply_fixes_to_fields,
     extract_cell_values,
     scan_table,
+    scan_table_notes,
     validate_cell_values,
 )
 
@@ -181,12 +182,44 @@ def test_scanner_includes_issues_from_later_tables():
     [
         ("no_headers.html", "no-headers"),
         ("unclosed_tags.html", "unclosed-tag"),
-        ("merged_cells.html", "merged-cells"),
-        ("multi_level_headers.html", "multi-level-headers"),
         ("missing_caption.html", "missing-caption"),
         ("spacer_row.html", "spacer-row"),
-        ("irregular_rows.html", "irregular-rows"),
     ],
 )
 def test_scanner_reports_expected_sample_issues(name, expected_issue):
     assert expected_issue in scan_table((SAMPLES / name).read_text())
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_note"),
+    [
+        ("merged_cells.html", "merged-cells"),
+        ("multi_level_headers.html", "multi-level-headers"),
+        ("irregular_rows.html", "irregular-rows"),
+    ],
+)
+def test_scanner_separates_complexity_notes_from_blocking_errors(name, expected_note):
+    source = (SAMPLES / name).read_text()
+
+    assert expected_note in scan_table_notes(source)
+    assert expected_note not in scan_table(source)
+
+
+def test_header_linked_by_id_and_headers_does_not_need_scope():
+    html = (
+        '<table><caption>Results</caption><thead><tr>'
+        '<th id="year">Year</th></tr></thead><tbody><tr>'
+        '<td headers="year">2025</td></tr></tbody></table>'
+    )
+
+    assert "header-missing-scope" not in scan_table(html)
+
+
+def test_unlinked_header_without_scope_is_blocking_even_with_complexity_notes():
+    html = (
+        "<table><caption>Results</caption><thead><tr>"
+        "<th id='year'>Year</th></tr></thead><tbody>"
+        "<tr><td>2025</td></tr></tbody></table>"
+    )
+
+    assert "header-missing-scope" in scan_table(html)

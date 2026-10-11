@@ -105,7 +105,7 @@ Use `--samples-dir` and `--output-dir` to select different local folders.
 For each field in `review.json`, `workflow_output/decisions.json` contains a
 pending decision. Set `decision` to `approve`, `reject`, or `manual`; add a
 note when rejecting. A field can be approved directly from rule output only
-when every table was fixed with no unresolved review reasons or scan issues.
+when every table was fixed with no blocking accessibility errors.
 Otherwise, provide corrected full-field HTML at
 `workflow_output/edits/<field>.html` before approving. The reviewer edit must
 preserve all ordered cell values and pass `scan_table` with no outstanding
@@ -116,13 +116,13 @@ reviewer edit. Apply pending choices with:
     python -m accessibility_remediation review
 
 An approved field's full validated HTML is copied to staging. This is the
-rules' fixed output only when every table was fixed without review reasons and
-the final field has no scan issues. Otherwise, the reviewer must provide
-corrected full-field HTML under `workflow_output/edits/<field>.html`; approval
-checks that cell values are unchanged and `scan_table` reports no issues before
-staging. Failed checks refuse approval and leave the field in review. The
-decision log identifies whether staged content came from the rules or a
-reviewer edit.
+rules' fixed output only when every table was fixed and the final field has no
+blocking scan errors; complexity notes do not block approval. Otherwise, the
+reviewer must provide corrected full-field HTML under
+`workflow_output/edits/<field>.html`; approval checks that cell values are
+unchanged and `scan_table` reports no blocking errors before staging. Failed
+checks refuse approval and leave the field in review. The decision log
+identifies whether staged content came from the rules or a reviewer edit.
 
 A first rejection requires a non-empty note and triggers one deterministic
 retry; the note is logged for a future AI step, but the rules do not consume
@@ -138,6 +138,11 @@ reviewed it. Decisions and notes are shown in the report. Re-running the main
 loop preserves pending decisions for fields that still need review. The report
 is regenerated after each review command from all fields, including fields
 already staged, approved, still in review, or sent to the manual queue.
+Review decisions are processed independently. If a decision is refused, the
+field stays in review with `decision_errors` in `review.json` and the report;
+other decisions are still applied and all workflow JSON/report files are saved.
+The review command exits non-zero and lists failed fields, which remain
+unapplied and can be corrected before retrying.
 
 The caption step is an explicit placeholder: it does not invent or insert
 caption text. A missing caption is routed through that step and remains in the
@@ -149,9 +154,15 @@ review.
 
 Use the scanner and conservative simple-table fixer from Python:
 
-    from accessibility_remediation import apply_fix, apply_fixes_to_fields, scan_table
+    from accessibility_remediation import (
+        apply_fix,
+        apply_fixes_to_fields,
+        scan_table,
+        scan_table_notes,
+    )
 
-    issues = scan_table(table_html)
+    errors = scan_table(table_html)
+    notes = scan_table_notes(table_html)
     result = apply_fix(table_html)
     fixed_html = result.html
     send_to_human_review = result.needs_review
@@ -173,12 +184,19 @@ validation passes. Unsupported tables remain unchanged and are flagged for
 review, while other tables in the field are still processed. Results requiring
 review must not enter an automatic staging path.
 
-`scan_table` returns issue codes found across all tables, such as missing-caption, no-headers,
-header-missing-scope, missing-thead, missing-tbody, unclosed-tag, merged-cells,
-multi-level-headers, spacer-row, and irregular-rows. apply_fix handles only regular,
-single-header-row tables: it may promote the first non-empty row to column
-headers, adds scope values, and creates thead/tbody sections. It preserves the
-ordered, normalized text values of all cells and raises an error if they differ.
+`scan_table` returns blocking accessibility errors found across all tables:
+missing-caption, no-headers, header-missing-scope, missing-thead, missing-tbody,
+unclosed-tag, and spacer-row. A header without `scope` is accepted only if its
+`id` is referenced by a data cell's `headers` attribute. `scan_table_notes`
+returns non-blocking complexity notes: merged-cells, multi-level-headers, and
+irregular-rows. These notes still route fields for human review, but do not
+block approval when each table is fixed, has no accessibility errors, and cell
+values are preserved.
+
+`apply_fix` handles only regular, single-header-row tables: it may promote the
+first non-empty row to column headers, adds scope values, and creates
+thead/tbody sections. It preserves the ordered, normalized text values of all
+cells and raises an error if they differ.
 
 The fixer deliberately refuses merged cells, irregular or spacer rows,
 multi-level headers, ambiguous existing header structures, and footer rows.

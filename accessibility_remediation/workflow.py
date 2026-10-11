@@ -12,7 +12,14 @@ from typing import Any
 
 from bs4 import BeautifulSoup, Comment, Tag
 
-from .tables import FieldFixResult, TableFixResult, apply_fix, scan_table, validate_cell_values
+from .tables import (
+    FieldFixResult,
+    TableFixResult,
+    apply_fix,
+    scan_table,
+    scan_table_notes,
+    validate_cell_values,
+)
 
 _PREVIEW_TAGS = {
     "table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td",
@@ -110,6 +117,8 @@ def _table_outcomes(
         before_view = before_tables[index - 1] if index <= len(before_tables) else ""
         after_view = after_tables[index - 1] if index <= len(after_tables) else before_view
         reasons = list(outcome.review_reasons)
+        complexity_notes_before = scan_table_notes(before_view)
+        reasons.extend(f"complexity-note:{note}" for note in complexity_notes_before)
         caption_step = None
         if "missing-caption" in outcome.issues_before:
             caption_step = _caption_ai_placeholder(before_view)
@@ -120,6 +129,9 @@ def _table_outcomes(
             "fixed": outcome.fixed,
             "issues_before": list(outcome.issues_before),
             "issues_after": list(outcome.issues_after),
+            "blocking_errors": list(outcome.issues_after),
+            "complexity_notes_before": complexity_notes_before,
+            "complexity_notes_after": scan_table_notes(after_view),
             "review_reasons": reasons,
             "caption_step": caption_step,
             "parsed_before_view": before_view,
@@ -151,6 +163,9 @@ def _evaluation_error(
                 "fixed": False,
                 "issues_before": scan_table(fragment),
                 "issues_after": scan_table(fragment),
+                "blocking_errors": scan_table(fragment),
+                "complexity_notes_before": scan_table_notes(fragment),
+                "complexity_notes_after": scan_table_notes(fragment),
                 "review_reasons": [message],
                 "caption_step": None,
                 "parsed_before_view": fragment,
@@ -163,6 +178,9 @@ def _evaluation_error(
             "fixed": False,
             "issues_before": scan_table(original_html),
             "issues_after": scan_table(original_html),
+            "blocking_errors": scan_table(original_html),
+            "complexity_notes_before": scan_table_notes(original_html),
+            "complexity_notes_after": scan_table_notes(original_html),
             "review_reasons": [message],
             "caption_step": None,
             "parsed_before_view": "",
@@ -196,6 +214,9 @@ def _evaluate_field(field: str, original_html: str) -> dict[str, Any]:
             "fixed": False,
             "issues_before": scan_table(original_html),
             "issues_after": scan_table(original_html),
+            "blocking_errors": scan_table(original_html),
+            "complexity_notes_before": scan_table_notes(original_html),
+            "complexity_notes_after": scan_table_notes(original_html),
             "review_reasons": reasons,
             "caption_step": None,
             "parsed_before_view": "",
@@ -282,8 +303,7 @@ def _rules_are_approval_ready(record: dict[str, Any]) -> bool:
     ]
     return bool(table_reviews) and all(
         table.get("fixed") is True
-        and not table.get("issues_after")
-        and not table.get("review_reasons")
+        and not table.get("blocking_errors", table.get("issues_after"))
         for table in table_reviews
     ) and not scan_table(record["fixed_html"])
 
@@ -327,6 +347,11 @@ def _set_approved_output(record: dict[str, Any], content: str, source: str) -> N
     for index, table in enumerate(record.get("table_reviews", [])):
         if index < len(parsed_tables):
             table["parsed_after_view"] = parsed_tables[index]
+            table["issues_after"] = scan_table(parsed_tables[index])
+            table["blocking_errors"] = list(table["issues_after"])
+            table["complexity_notes_after"] = scan_table_notes(parsed_tables[index])
+            if source == "reviewer_edit":
+                table["reviewer_corrected"] = True
 
 
 def _unstage_field(staging_dir: Path, field: str) -> None:
@@ -381,6 +406,7 @@ def _render_report(records: list[dict[str, Any]], table_count: int, staged: int)
         for table in record.get("table_reviews", []):
             table_index = html.escape(str(table.get("table")))
             reasons = table.get("review_reasons", [])
+            complexity_notes = table.get("complexity_notes_before", [])
             reason_markup = (
                 "<ul>" + "".join(f"<li>{html.escape(str(reason))}</li>" for reason in reasons) + "</ul>"
                 if reasons else "<p>None</p>"
@@ -397,7 +423,8 @@ def _render_report(records: list[dict[str, Any]], table_count: int, staged: int)
             after_view = str(table.get("parsed_after_view", ""))
             table_details.append(
                 f"<article><h3>Table {table_index} — parsed view (not original source)</h3>"
-                f"<p>Review reasons:</p>{reason_markup}{caption_markup}"
+                f"<p>Review reasons:</p>{reason_markup}"
+                f"<p>Complexity notes: {html.escape(', '.join(complexity_notes)) or 'None'}</p>{caption_markup}"
                 f"<div class=\"comparison\">"
                 f"<div><h4>Before — parsed view</h4><div class=\"preview\">"
                 f"{_sanitize_preview(before_view)}</div><pre><code>{html.escape(before_view)}</code></pre></div>"
@@ -411,10 +438,16 @@ def _render_report(records: list[dict[str, Any]], table_count: int, staged: int)
             f"; approved HTML source: {html.escape(str(approval_source))}"
             if approval_source else ""
         )
+        decision_errors = record.get("decision_errors", [])
+        errors_markup = (
+            "<ul>" + "".join(f"<li>{html.escape(str(error))}</li>" for error in decision_errors) + "</ul>"
+            if decision_errors else "<p>None</p>"
+        )
         sections.append(
             f"<section><h2>Field {field}</h2>"
             f"<p>Status: <strong>{status}</strong>; decision: <strong>{decision}</strong>; "
             f"attempt: {attempt}{source_markup}</p><h3>Notes</h3>{notes_markup}"
+            f"<h3>Decision errors</h3>{errors_markup}"
             f"<div class=\"comparison\">"
             f"<div><h3>Before — original source (exact field text)</h3>"
             f"<div class=\"preview\">{original_preview}</div><pre><code>{original_code}</code></pre></div>"
@@ -536,6 +569,7 @@ def run_workflow(
         record = _evaluate_field(field, original_html)
         previous = prior_by_field.get(field, {})
         record["feedback_notes"] = list(previous.get("feedback_notes", []))
+        record["decision_errors"] = list(previous.get("decision_errors", []))
         actual_tables = [
             table for table in record.get("table_reviews", [])
             if table.get("table") is not None
@@ -614,6 +648,13 @@ def _log_decision(
     log_path = output_dir / "review_log.jsonl"
     if log_path.is_symlink() or log_path.parent.is_symlink():
         raise ValueError(f"Refusing to write through a symlink: {log_path}")
+    if log_path.exists():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            previous = json.loads(line)
+            if all(previous.get(key) == event.get(key) for key in (
+                "field", "decision", "note", "attempt", "reviewer", "approved_html_source",
+            )):
+                return
     with log_path.open("a", encoding="utf-8") as log:
         log.write(json.dumps(event, ensure_ascii=False) + "\n")
 
@@ -637,7 +678,7 @@ def _decision_notes_for_field(output_dir: Path, field: str) -> list[dict[str, An
 def process_review_decisions(
     output_dir: str | Path = "workflow_output",
     reviewer: str | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Apply pending reviewer decisions to local review records and staging."""
     destination = Path(output_dir)
     _ensure_output_directory(destination)
@@ -661,7 +702,8 @@ def process_review_decisions(
     for field, record in updated_records.items():
         all_field_records[field] = record
 
-    for field, record in updated_records.items():
+    failed_fields: list[str] = []
+    for field, record in list(updated_records.items()):
         decision_entry = decisions.get(field)
         if not decision_entry:
             continue
@@ -670,100 +712,132 @@ def process_review_decisions(
         attempt = decision_entry.get("attempt", 1)
         if choice is None or _already_applied(decision_entry):
             continue
-        if choice not in _DECISIONS:
-            raise ValueError(f"Invalid decision for {field}: choose approve, reject, or manual.")
-        if not isinstance(note, str):
-            raise ValueError(f"Decision note for {field} must be text.")
-        if choice == "reject" and not note.strip():
-            raise ValueError(f"Reject decision for {field} requires a non-empty note.")
-        if not isinstance(attempt, int) or attempt < 1:
-            raise ValueError(f"Attempt for {field} must be a positive integer.")
+        html_source: str | None = None
+        applied_kind: str | None = None
+        try:
+            if choice not in _DECISIONS:
+                raise ValueError("choose approve, reject, or manual.")
+            if not isinstance(note, str):
+                raise ValueError("decision note must be text.")
+            if choice == "reject" and not note.strip():
+                raise ValueError("reject decision requires a non-empty note.")
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                raise ValueError("attempt must be a positive integer.")
 
-        if choice == "approve":
-            original_html = record["original_html"]
-            fixed_html, html_source = _approved_html(destination, record)
-            validate_cell_values(original_html, fixed_html)
-            issues = scan_table(fixed_html)
-            if issues:
-                raise ValueError(
-                    f"Cannot approve {field}: approved HTML has unresolved issues: "
-                    f"{', '.join(issues)}."
-                )
-            _stage_field(staging_dir, field, fixed_html)
-            _set_approved_output(record, fixed_html, html_source)
-            record["status"] = "approved"
-            record["decision"] = "approve"
-            record["note"] = note
-            record["attempt"] = attempt
-            _log_decision(
-                destination,
-                field,
-                choice,
-                note,
-                attempt,
-                reviewer,
-                approved_html_source=html_source,
-            )
-            _mark_applied(decision_entry)
-            all_field_records[field] = record
-            staged += 1
-        elif choice == "manual" or attempt >= 2:
-            _unstage_field(staging_dir, field)
-            _log_decision(destination, field, choice, note, attempt, reviewer)
-            _mark_applied(decision_entry)
-            record["status"] = "manual"
-            record["decision"] = "manual" if choice == "manual" else "reject"
-            record["note"] = note
-            record["attempt"] = attempt
-            queued += 1
-            manual_queue = _read_json(destination / "manual_queue.json", [])
-            manual_by_field = {
-                entry["field"]: entry for entry in manual_queue
-                if isinstance(entry, dict) and isinstance(entry.get("field"), str)
-            } if isinstance(manual_queue, list) else {}
-            event_notes = _decision_notes_for_field(destination, field)
-            record["feedback_notes"] = event_notes
-            manual_record = {
-                **record,
-                "notes": event_notes,
-                "reasons": [
-                    reason
-                    for table in record.get("table_reviews", [])
-                    for reason in table.get("review_reasons", [])
-                ] + list(record.get("errors", [])),
-            }
-            manual_by_field[field] = manual_record
-            _write_json(destination / "manual_queue.json", list(manual_by_field.values()))
-            all_field_records[field] = record
-        else:
-            _unstage_field(staging_dir, field)
-            _log_decision(destination, field, choice, note, attempt, reviewer)
-            _mark_applied(decision_entry)
-            original_html = record["original_html"]
-            retried_record = _evaluate_field(field, original_html)
-            feedback_notes = list(record.get("feedback_notes", []))
-            feedback_notes.append({
-                "attempt": attempt,
-                "note": note,
-                "reviewer": reviewer,
-            })
-            retried_record["feedback_notes"] = feedback_notes
-            retried_record["attempt"] = 2
-            retried_record["note"] = note
-            retried_record["decision"] = None
-            if retried_record["status"] == "staged":
-                _stage_field(staging_dir, field, retried_record["fixed_html"])
-                updated_records.pop(field, None)
-                decisions.pop(field, None)
-                retried_record["status"] = "staged_after_retry"
-                all_field_records[field] = retried_record
-                staged += 1
+            if choice == "approve":
+                original_html = record["original_html"]
+                fixed_html, html_source = _approved_html(destination, record)
+                validate_cell_values(original_html, fixed_html)
+                issues = scan_table(fixed_html)
+                if issues:
+                    raise ValueError(
+                        f"approved HTML has unresolved issues: {', '.join(issues)}."
+                    )
+                _stage_field(staging_dir, field, fixed_html)
+                _set_approved_output(record, fixed_html, html_source)
+                record["status"] = "approved"
+                record["decision"] = "approve"
+                record["note"] = note
+                record["attempt"] = attempt
+                applied_kind = "staged"
+            elif choice == "manual" or attempt >= 2:
+                record["status"] = "manual"
+                record["decision"] = "manual" if choice == "manual" else "reject"
+                record["note"] = note
+                record["attempt"] = attempt
+                event_notes = _decision_notes_for_field(destination, field)
+                if note:
+                    event_notes.append({
+                        "attempt": attempt,
+                        "note": note,
+                        "reviewer": reviewer,
+                    })
+                record["feedback_notes"] = event_notes
+                manual_queue = _read_json(destination / "manual_queue.json", [])
+                manual_by_field = {
+                    entry["field"]: entry for entry in manual_queue
+                    if isinstance(entry, dict) and isinstance(entry.get("field"), str)
+                } if isinstance(manual_queue, list) else {}
+                manual_record = {
+                    **record,
+                    "notes": event_notes,
+                    "reasons": [
+                        reason
+                        for table in record.get("table_reviews", [])
+                        for reason in table.get("review_reasons", [])
+                    ] + list(record.get("errors", [])),
+                }
+                manual_by_field[field] = manual_record
+                _write_json(destination / "manual_queue.json", list(manual_by_field.values()))
+                _unstage_field(staging_dir, field)
+                applied_kind = "manual"
             else:
-                updated_records[field] = retried_record
-                all_field_records[field] = retried_record
-                decision_entry["decision"] = None
-                decision_entry["attempt"] = 2
+                original_html = record["original_html"]
+                retried_record = _evaluate_field(field, original_html)
+                feedback_notes = list(record.get("feedback_notes", []))
+                feedback_notes.append({
+                    "attempt": attempt,
+                    "note": note,
+                    "reviewer": reviewer,
+                })
+                retried_record["feedback_notes"] = feedback_notes
+                retried_record["attempt"] = 2
+                retried_record["note"] = note
+                retried_record["decision"] = None
+                record = retried_record
+                _unstage_field(staging_dir, field)
+                if retried_record["status"] == "staged":
+                    _stage_field(staging_dir, field, retried_record["fixed_html"])
+                    updated_records.pop(field, None)
+                    decisions.pop(field, None)
+                    retried_record["status"] = "staged_after_retry"
+                    all_field_records[field] = retried_record
+                    applied_kind = "staged"
+                else:
+                    updated_records[field] = retried_record
+                    all_field_records[field] = retried_record
+                    decision_entry["decision"] = None
+                    decision_entry["attempt"] = 2
+                    applied_kind = "retried"
+
+            record["decision_errors"] = []
+            if choice in {"manual", "reject"}:
+                _log_decision(destination, field, choice, note, attempt, reviewer)
+            elif choice == "approve":
+                _log_decision(
+                    destination,
+                    field,
+                    choice,
+                    note,
+                    attempt,
+                    reviewer,
+                    approved_html_source=html_source,
+                )
+            _mark_applied(decision_entry)
+            if applied_kind == "staged":
+                staged += 1
+            elif applied_kind == "manual":
+                queued += 1
+            elif applied_kind == "retried":
                 retried += 1
+            if field in updated_records:
+                updated_records[field] = record
+            all_field_records[field] = record if choice != "reject" or attempt >= 1 else record
+        except (ValueError, OSError, json.JSONDecodeError) as error:
+            if choice == "approve":
+                _unstage_field(staging_dir, field)
+            message = str(error)
+            errors = list(record.get("decision_errors", []))
+            if message not in errors:
+                errors.append(message)
+            record["decision_errors"] = errors
+            record["status"] = "review"
+            record["decision"] = choice
+            record["note"] = note if isinstance(note, str) else ""
+            record["attempt"] = attempt if isinstance(attempt, int) else 1
+            updated_records[field] = record
+            all_field_records[field] = record
+            failed_fields.append(field)
 
     updated = list(updated_records.values())
     _write_json(destination / "review.json", updated)
@@ -771,4 +845,7 @@ def process_review_decisions(
     all_fields = list(all_field_records.values())
     _write_json(destination / "fields.json", all_fields)
     _write_report(destination, all_fields)
-    return {"staged": staged, "retried": retried, "manual": queued}
+    result = {"staged": staged, "retried": retried, "manual": queued}
+    if failed_fields:
+        result["failed_fields"] = failed_fields
+    return result

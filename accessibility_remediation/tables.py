@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup, Tag
 
 _STRUCTURAL_TAGS = {"table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td"}
 _CELL_TAGS = {"th", "td"}
+_COMPLEXITY_NOTES = {"merged-cells", "multi-level-headers", "irregular-rows"}
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,15 @@ def _cell_text(cell: Tag) -> str:
     return " ".join(cell.get_text(" ", strip=True).split())
 
 
+def _attribute_tokens(cell: Tag, attribute: str) -> set[str]:
+    value = cell.get(attribute, [])
+    if isinstance(value, str):
+        return set(value.split())
+    if isinstance(value, list):
+        return {token for item in value if isinstance(item, str) for token in item.split()}
+    return set()
+
+
 def extract_cell_values(html: str) -> list[str]:
     """Return ordered, normalized text values from all tables in the HTML."""
     soup = _parse_html(html)
@@ -136,8 +146,9 @@ def _scan_one_table(
     table: Tag,
     index: int,
     parser: _UnclosedTagParser,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     issues: list[str] = []
+    notes: list[str] = []
     if index in parser.malformed_tables:
         issues.append("unclosed-tag")
 
@@ -147,10 +158,21 @@ def _scan_one_table(
     cells = table.find_all(["th", "td"])
     if not any(cell.name == "th" and cell.find_parent("table") is table for cell in cells):
         issues.append("no-headers")
+    own_cells = [cell for cell in cells if cell.find_parent("table") is table]
+    referenced_headers = {
+        header_id
+        for cell in own_cells
+        if cell.name == "td"
+        for header_id in _attribute_tokens(cell, "headers")
+    }
     if any(
-        cell.name == "th" and not cell.has_attr("scope")
-        for cell in cells
-        if cell.find_parent("table") is table
+        cell.name == "th"
+        and not (
+            isinstance(cell.get("scope"), str)
+            and cell.get("scope", "").strip().lower() in {"row", "col", "rowgroup", "colgroup"}
+        )
+        and not (cell.get("id") and cell.get("id") in referenced_headers)
+        for cell in own_cells
     ):
         issues.append("header-missing-scope")
 
@@ -160,11 +182,8 @@ def _scan_one_table(
     if "tbody" not in explicit_tags:
         issues.append("missing-tbody")
 
-    own_cells = [
-        cell for cell in cells if cell.find_parent("table") is table
-    ]
     if any(cell.has_attr("rowspan") or cell.has_attr("colspan") for cell in own_cells):
-        issues.append("merged-cells")
+        notes.append("merged-cells")
 
     rows = [
         row for row in table.find_all("tr")
@@ -179,16 +198,12 @@ def _scan_one_table(
         len(row.find_all(["th", "td"], recursive=False))
         for row in rows
     }
-    has_merged_cells = any(
-        cell.has_attr("rowspan") or cell.has_attr("colspan")
-        for cell in own_cells
-    )
-    if len(widths) > 1 and not has_merged_cells:
-        issues.append("irregular-rows")
+    if len(widths) > 1:
+        notes.append("irregular-rows")
 
     thead = table.find("thead", recursive=False)
     if isinstance(thead, Tag) and len(thead.find_all("tr")) > 1:
-        issues.append("multi-level-headers")
+        notes.append("multi-level-headers")
     elif thead is None:
         leading_header_rows = 0
         for row in rows:
@@ -198,13 +213,13 @@ def _scan_one_table(
             else:
                 break
         if leading_header_rows > 1:
-            issues.append("multi-level-headers")
+            notes.append("multi-level-headers")
 
-    return issues
+    return list(dict.fromkeys(issues)), list(dict.fromkeys(notes))
 
 
 def scan_table(html: str) -> list[str]:
-    """List detectable issues across every table in the supplied HTML."""
+    """List blocking accessibility errors across all tables in the HTML."""
     parser = _UnclosedTagParser()
     parser.feed(html)
     parser.close()
@@ -215,8 +230,22 @@ def scan_table(html: str) -> list[str]:
 
     issues: list[str] = []
     for index, table in enumerate(tables, start=1):
-        issues.extend(_scan_one_table(table, index, parser))
+        table_issues, _ = _scan_one_table(table, index, parser)
+        issues.extend(table_issues)
     return list(dict.fromkeys(issues))
+
+
+def scan_table_notes(html: str) -> list[str]:
+    """List review-worthy structural complexity notes across all tables."""
+    parser = _UnclosedTagParser()
+    parser.feed(html)
+    parser.close()
+    soup = _parse_html(html)
+    return list(dict.fromkeys(
+        note
+        for index, table in enumerate(soup.find_all("table"), start=1)
+        for note in _scan_one_table(table, index, parser)[1]
+    ))
 
 
 def _repair_table(soup: BeautifulSoup, table: Tag) -> bool:
@@ -314,7 +343,7 @@ def apply_fix(html: str) -> FieldFixResult:
 
     outcomes: list[TableFixResult] = []
     for index, table in enumerate(tables, start=1):
-        issues_before = tuple(_scan_one_table(table, index, source_parser))
+        issues_before = tuple(_scan_one_table(table, index, source_parser)[0])
         try:
             inferred_headers = _repair_table(soup, table)
         except ValueError as error:
@@ -332,7 +361,7 @@ def apply_fix(html: str) -> FieldFixResult:
         result_parser = _UnclosedTagParser()
         result_parser.feed(str(table))
         result_parser.close()
-        issues_after = tuple(_scan_one_table(table, 1, result_parser))
+        issues_after = tuple(_scan_one_table(table, 1, result_parser)[0])
         reasons: list[str] = []
         confidence = 1.0
         if inferred_headers:
