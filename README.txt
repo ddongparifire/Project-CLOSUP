@@ -1,0 +1,74 @@
+CLOSUP LEGACY DIGITAL ACCESSIBILITY REMEDIATION
+Prototype workflow
+
+Purpose
+
+This prototype workflow is for remediating approximately 2,900 legacy Drupal
+table records (about 3,200 records total). A record may contain up to four HTML
+code fields. The goal is to bring tables to WCAG 2.1 AA and align them with the
+2025 table template.
+
+This document describes the proposed workflow; it does not mean that the agent,
+Drupal integrations, or other tools have been implemented or approved.
+
+Before processing records
+
+- Use an AI platform approved by the University of Michigan (U-M).
+- Select and test deterministic rule tools, and prepare the agent instructions.
+- Back up source content and preserve each record's original HTML for rollback.
+- Classify records and hand-check a sample of tables against the 2025 template.
+- Confirm access and review arrangements listed under Open setup decisions.
+
+Processing workflow
+
+1. Fetch a record's HTML and relevant context, including its template and
+   classification.
+2. Scan for accessibility issues. Apply deterministic, tested rule-tool fixes
+   first.
+3. Use AI judgment only for issues the rules cannot resolve, such as writing a
+   caption or interpreting ambiguous headers. Treat all AI-written text as
+   requiring human review.
+4. Validate the result for accessibility and confirm that table cell data is
+   unchanged. Write passing results to staging only.
+5. Flag validation failures, low-confidence results, and unknown patterns for
+   human review. Do not silently accept or publish them.
+6. Have a human review every flagged record, all AI-written text, and a random
+   5-10% sample of records that pass automatically.
+7. For a rejected result, allow one feedback-and-retry cycle. If it is rejected
+   a second time, route it for manual remediation. Log reviewer feedback and
+   update the rules or agent instructions when issues recur.
+8. Publish only human-approved records, in batches of a few hundred. The agent
+   cannot publish to production.
+9. Re-scan every live table after publication and screen-reader-test
+   representative examples. Use the preserved original HTML if rollback is
+   needed.
+
+Roles
+
+- Rule tools: Handle known, deterministic fixes that have been tested.
+- Remediation agent: Fetch context, run tools, use limited judgment for
+  unresolved issues, validate, write passing results to staging, and flag
+  uncertain or failed results. It must not publish to production.
+- Human reviewer: Review flagged records and AI-written text, sample
+  auto-passing records, approve publication, and resolve items sent for manual
+  remediation.
+
+Safeguards
+
+- Keep a backup and the original HTML for every processed record.
+- Preserve table cell data; validate before writing results to staging.
+- Keep low-confidence, failed, and unknown cases out of the passing path.
+- Require human approval before production publication.
+- Record outcomes and feedback so recurring issues can improve the tools and
+  instructions.
+
+Open setup decisions
+
+- Which U-M-approved AI platform to use and its cost.
+- How authentication and multi-factor authentication (MFA) will work.
+- What staging, API, or Drush access is available and approved.
+- Which sample records and 2025 table template will be used for setup and
+  hand-checking.
+- Who approves text written by AI.
+- How Drupal revisions, date fields, and cache effects will be handled during
+  staging and publication.
