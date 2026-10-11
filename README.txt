@@ -94,18 +94,40 @@ Run the local agent-loop prototype against all bundled samples with one command:
     python -m accessibility_remediation
 
 It runs fetch (local file read), scan, deterministic fix, and cell-value
-validation for every `.html` sample. Passing tables are written individually
-under `workflow_output/staging/`. Tables needing review are listed with reasons
-in `workflow_output/review.json`. The HTML comparison report for every table,
-including before/after markup and caption-step status, is
-`workflow_output/report.html`. Use `--samples-dir` and `--output-dir` to select
-different local folders.
+validation for every `.html` sample, treating each file as one code field.
+Passing fields are written whole to `workflow_output/staging/<field>.html`.
+If any table in a field needs review, no part of that field is staged; the
+whole field and per-table reasons are recorded in `workflow_output/review.json`.
+The report at `workflow_output/report.html` shows exact raw source, escaped
+code, a sanitized rendered preview, parsed table views, and decision status.
+Use `--samples-dir` and `--output-dir` to select different local folders.
+
+For each field in `review.json`, `workflow_output/decisions.json` contains a
+pending decision. Set `decision` to `approve`, `reject`, or `manual`; add a
+note when rejecting. Apply pending choices with:
+
+    python -m accessibility_remediation review
+
+An approved field's full fixed HTML is copied to staging. A first rejection
+requires a non-empty note and triggers one deterministic retry; the note is
+logged for a future AI step, but the rules do not consume it. A still-flagged
+field returns to review at attempt 2. A second rejection or `manual` decision
+moves the field, notes, and reasons to `workflow_output/manual_queue.json`.
+After a first rejection, the loop sets the decision back to `null` and advances
+the attempt to 2; the reviewer may then set a second decision. A passing retry
+is staged and removed from the active review list.
+Every applied decision is appended with a timestamp to
+`workflow_output/review_log.jsonl`; pass `--reviewer "Name"` to record who
+reviewed it. Decisions and notes are shown in the report. Re-running the main
+loop preserves pending decisions for fields that still need review.
 
 The caption step is an explicit placeholder: it does not invent or insert
 caption text. A missing caption is routed through that step and remains in the
 review list until caption drafting and human review are implemented. Outputs
 are local demo artifacts only; the loop does not connect to Drupal or publish
-content.
+content. The rendered report preview strips scripts, styles, event handlers,
+and non-approved tags or attributes; the escaped code retains the source for
+review.
 
 Use the scanner and conservative simple-table fixer from Python:
 
