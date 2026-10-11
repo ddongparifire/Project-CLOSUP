@@ -8,8 +8,9 @@ table records (about 3,200 records total). A record may contain up to four HTML
 code fields. The goal is to bring tables to WCAG 2.1 AA and align them with the
 2025 table template.
 
-This document describes the proposed workflow; it does not mean that the agent,
-Drupal integrations, or other tools have been implemented or approved.
+The deterministic table tools and local sample-processing loop are implemented
+as a prototype. Drupal integrations, AI caption generation, and production use
+have not been implemented or approved.
 
 Before processing records
 
@@ -87,6 +88,24 @@ To install its dependencies and run the tests from the repository root:
     python -m pytest
 
 The ten made-up legacy examples are in samples/legacy/.
+
+Run the local agent-loop prototype against all bundled samples with one command:
+
+    python -m accessibility_remediation
+
+It runs fetch (local file read), scan, deterministic fix, and cell-value
+validation for every `.html` sample. Passing tables are written individually
+under `workflow_output/staging/`. Tables needing review are listed with reasons
+in `workflow_output/review.json`. The HTML comparison report for every table,
+including before/after markup and caption-step status, is
+`workflow_output/report.html`. Use `--samples-dir` and `--output-dir` to select
+different local folders.
+
+The caption step is an explicit placeholder: it does not invent or insert
+caption text. A missing caption is routed through that step and remains in the
+review list until caption drafting and human review are implemented. Outputs
+are local demo artifacts only; the loop does not connect to Drupal or publish
+content.
 
 Use the scanner and conservative simple-table fixer from Python:
 
